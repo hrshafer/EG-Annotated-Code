@@ -1,0 +1,438 @@
+---
+title: "Assignment 2 Code"
+author: "Hannah Shafer"
+date: "10/25/2021"
+output:
+  word_document: default
+  html_document: default
+---
+
+Set working directory and load appropriate packages:
+```
+setwd("~/Desktop/eco gen/Ecological-Genomics")
+library(DESeq2)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(ggpubr)
+library(wesanderson)
+library(vsn)
+```
+
+Transfer the appropriate files from the server to my laptop:
+```
+hannahshafer@ip0af52801 ~ % scp hrshafer@pbio381.uvm.edu:/data/project_data/RNAseq/tonsa_play/DE_counts_F1.txt .
+hrshafer@pbio381.uvm.edu's password: 
+DE_counts_F1.txt                                                                         100% 6977KB   3.1MB/s   00:02    
+hannahshafer@ip0af52801 ~ % scp hrshafer@pbio381.uvm.edu:/data/project_data/RNAseq/tonsa_play/DE_counts_F3.txt .
+hrshafer@pbio381.uvm.edu's password: 
+DE_counts_F3.txt                                                                         100% 7239KB   4.3MB/s   00:01    
+hannahshafer@ip0af52801 ~ % scp hrshafer@pbio381.uvm.edu:/data/project_data/RNAseq/tonsa_play/RT_tonsa_F1_samples.txt .
+hrshafer@pbio381.uvm.edu's password: 
+RT_tonsa_F1_samples.txt                                                                  100%  543   104.9KB/s   00:00    
+hannahshafer@ip0af52801 ~ % scp hrshafer@pbio381.uvm.edu:/data/project_data/RNAseq/tonsa_play/RT_tonsa_F3_samples.txt .
+hrshafer@pbio381.uvm.edu's password: 
+RT_tonsa_F3_samples.txt                                                                  100%  543   148.6KB/s   00:00    
+hannahshafer@ip0af52801 ~ % 
+```
+
+Let's start with the F1 generation:
+```
+countsTable <- read.table("DE_counts_F1.txt", header=TRUE, row.names=1)
+#above, import the counts matrix; this is our cleaned reference file that contains a big matrix of all our samples by all of our genes
+dim(countsTable)
+#[1] 24362    16   #the dims command shows that we have 24362 genes across 16 samples
+countsTableRound <- round(countsTable)
+#we round the numbers because DESeq2 doesn't use decimals and Salmon - the program that produced the counts matrix - outputs data with demicals
+conds <- read.delim("RT_tonsa_F1_samples.txt", header=TRUE, stringsAsFactors=TRUE, row.names=1)
+```
+
+This next block will show how many reads we have from each sample:
+```
+print(conds)
+colSums(countsTableRound)
+mean(colSums(countsTableRound))
+barplot(colSums(countsTableRound), names.arg=colnames(countsTableRound),cex.names=0.5,las=3)
+abline(h=mean(colSums(countsTableRound)), col="blue", lwd=2)
+#output = histogram
+```
+
+Next, we can see the average number of counts per gene
+```
+rowSums(countsTableRound)
+mean(rowSums(countsTableRound))
+#[1] 11930.81
+median(rowSums(countsTableRound))
+#[1] 2226
+#As we can see, the mean is much higher than median because it is driven up by some really highly expressed genes - there is a long tail in the distribution where there are many genes that are really highly expressed like housekeeping genes, maybe also due to PCR amplification but it's pretty long for even that
+```
+
+Next, we'll delve into the data manipulation using DESeq2:
+
+The first step is to create a DESeq object and define the experimental design - here, with the tilda (as is typical in describing a model in R). We need to do this step before we can start manipulating the file; this is similar to the import function in the terminal
+```
+dds <- DESeqDataSetFromMatrix(countData = countsTableRound, colData = conds, design = ~ line + environment + line:environment)
+dim(dds)
+#[1] 24362    16   #again, we can see that we are working with 24362 genes across 16 samples
+```
+
+Now that dds is defined, we can start filtering the data according to our specifications
+```
+dds <- dds[rowSums(counts(dds)) >160]
+#This filters out all of our reads that appear on average 10 times or fewer in our samples
+dim(dds)
+#[1] 24362    16   #The number of genes retained is the same as above
+
+dds <- DESeq(dds)
+#Run the DESeq model to test for differential gene expression
+
+#List the results we just generated, tells us the names of the things we can pull out now to look at
+resultsNames(dds)
+#[1] "Intercept"                  "line_combined_vs_ambient"  
+#[3] "environment_HH_vs_AA"       "linecombined.environmentHH"
+```
+
+Let's start with a PCA to look at the patterns of expression/visualize global gene expression patterns
+```
+vsd <- vst(dds, blind=FALSE)
+data <- plotPCA(vsd, intgroup=c("line", "environment"),returnData=TRUE)
+percentVar <- round(100 * attr(data, "percentVar"))
+#And now plot the PCS using ggplot - first say where you're getting the info from (data) and then what you want it to look like (aes)
+ggplot(data, aes(PC1, PC2, color=environment, shape=line)) + geom_point(size=4, alpha=0.85) + xlab(paste0("PC1: ", percentVar[1], "% variance")) + ylab(paste0("PC2: ",percentVar[2], "% variance")) + theme_minimal()
+#output = PCA; we can see strong clustering based on environment and some clustering based on line, too
+```
+
+Next, summarize our results and see how many of our genes are interacting significantly
+```
+resInteraction <- results(dds, alpha=0.05)
+resInteraction <- resInteraction[order(resInteraction$padj),]
+summary(resInteraction)
+#out of 24362 with nonzero total read count
+#adjusted p-value < 0.05
+#LFC > 0 (up)       : 2839, 12%
+#LFC < 0 (down)     : 1053, 4.3%
+#outliers [1]       : 9, 0.037%
+#low counts [2]     : 473, 1.9%
+#(mean count < 18)
+#[1] see 'cooksCutoff' argument of ?results
+#[2] see 'independentFiltering' argument of ?results
+#Therefore, about 16% of genes interacted significantly
+```
+
+Now that we know there are genes interacting significantly, we can test for the effects of each factor we're considering:
+
+First, let's test for the effects of the environment
+```
+dds <- DESeqDataSetFromMatrix(countData = countsTableRound, colData = conds, design = ~ line + environment)
+dds <- DESeq(dds, test="LRT",reduced=~line + environment:line)
+resultsNames(dds)
+#[1] "Intercept"                "line_combined_vs_ambient" "environment_HH_vs_AA"
+resEnv <- results(dds, alpha = 0.05)
+resEnv <- resEnv[order(resEnv$padj),]
+summary(resEnv)
+#out of 24362 with nonzero total read count
+#adjusted p-value < 0.05
+#LFC > 0 (up)       : 213, 0.87%   #upregulated in greenhouse conditions
+#LFC < 0 (down)     : 235, 0.96%   #upregulated in ambient conditions
+#outliers [1]       : 41, 0.17%
+#low counts [2]     : 473, 1.9%
+#(mean count < 18)
+#[1] see 'cooksCutoff' argument of ?results
+#[2] see 'independentFiltering' argument of ?results
+resEnv <- resEnv[!is.na(resEnv$padj),]
+
+#This creates a new resEnv object that exludes any missing data points
+
+degsEnv <- row.names(resEnv[resEnv$padj < 0.05,])
+length(degsEnv)
+#[1] 448   #and here we can confirm (213+235 =) 448 genes were affected by environment changes - 448 genes had differential expression based on if they were in ambient or greenhouse conditions at the time of sampling
+```
+
+Second, let's do the same series of commands as above, but testing for effects of selection line
+```
+dds <- DESeqDataSetFromMatrix(countData = countsTableRound, colData = conds, design = ~ environment + line)
+
+dds <- DESeq(dds, test="LRT", reduced=~environment)
+resultsNames(dds)
+#[1] "Intercept"                "environment_HH_vs_AA"    
+#[3] "line_combined_vs_ambient"
+resLine <- results(dds, alpha = 0.05)
+resLine <- resLine[order(resLine$padj),]
+summary(resLine)
+#out of 24362 with nonzero total read count
+#adjusted p-value < 0.05
+#LFC > 0 (up)       : 72, 0.3%
+#LFC < 0 (down)     : 154, 0.63%
+#outliers [1]       : 41, 0.17%
+#low counts [2]     : 2362, 9.7%
+#(mean count < 25)
+#[1] see 'cooksCutoff' argument of ?results
+#[2] see 'independentFiltering' argument of ?results
+
+resLine <- resLine[!is.na(resLine$padj),]
+degsline <- row.names(resLine[resLine$padj < 0.05,])
+length(degsline)
+#[1] 226   #226 genes were affected by line - 226 genes had differential gene expression based on the conditions they were reared in during the 20-generation experimental evolution period
+```
+
+Finally, let's see how many genes had differential expression based on an interaction between environment and line
+```
+dds <- DESeqDataSetFromMatrix(countData = countsTableRound, colData = conds, design = ~ environment + line + environment:line)
+
+dds <- DESeq(dds, test="LRT", reduced=~environment + line)
+resultsNames(dds)
+#[1] "Intercept"                "environment_HH_vs_AA"     "line_combined_vs_ambient"
+#[4] "environmentHH.linecombined"
+
+resInt <- results(dds, alpha = 0.05)
+resInt <- resInt[order(resInt$padj),]
+summary(resInt)
+#out of 24362 with nonzero total read count
+#adjusted p-value < 0.05
+#LFC > 0 (up)       : 2802, 12%
+#LFC < 0 (down)     : 1052, 4.3%
+#outliers [1]       : 9, 0.037%
+#low counts [2]     : 945, 3.9%
+#(mean count < 20)
+#[1] see 'cooksCutoff' argument of ?results
+#[2] see 'independentFiltering' argument of ?results
+resInt <- resInt[!is.na(resInt$padj),]
+degsInt <- row.names(resInt[resInt$padj < 0.05,])
+length(degsInt)
+# [1] 3854   #And here we see 3854 genes, more than env & line, affected by the interaction of line & environment
+```
+
+Test to see if our stats are working: are we getting the graphs we expected based on genes identified as being differentially expressed for each effect/interaction? Yes!
+
+```
+d <-plotCounts(dds, gene="TRINITY_DN144155_c0_g8", intgroup = (c("line","environment")), returnData=TRUE)
+d
+p <-ggplot(d, aes(x=environment, y=count, color=line, shape=line, group=line)) + theme_minimal() + theme(text = element_text(size=20), panel.grid.major=element_line(colour="grey"))
+p <- p + geom_point(position=position_jitter(w=0.2,h=0), size=3)
+p <- p + stat_summary(fun = mean, geom = "line") #lines connecting means
+p <- p + stat_summary(fun = mean, geom = "point", size=5, alpha=0.7) #points at means
+p
+
+#First: TRINITY_DN138549_c1_g2; graph exhibiting environmental effect
+#Then try: TRINITY_DN115950_c0_g1; graph exhibiting interaction
+#Finally try: TRINITY_DN144155_c0_g8; graph exhibiting line effect
+```
+
+Venn Diagram Visualization:
+```
+library(eulerr)
+
+#Total genes involved in env, line, or int
+length(degsEnv)
+#[1] 448
+length(degsline)
+#[1] 226
+length(degsInt)
+#[1] 3854
+
+#Intersections - how many genes overlap between all the comparisons
+length(intersect(degsEnv,degsline))
+#[1] 37
+length(intersect(degsEnv,degsInt))
+#[1] 44
+length(intersect(degsInt,degsline))
+#[1] 34
+
+#and last, we want to save the intersection of environment and line to calculate the genes that fall into that center spot
+intEL <- intersect(degsEnv,degsline)
+length(intersect(degsInt,intEL))
+#[1] 7   #7 genes overlap across all three designations
+
+# Number unique
+448-44-37-7
+#[1] 360
+226-37-34-7
+#[1] 148
+3854-44-34-7
+#[1] 3769
+
+#Plot Venn Diagram
+fit1 <- euler(c("Env" = 360, "Line" = 148, "Interaction" = 3769, "Env&Line" = 37, "Env&Interaction" = 44, "Line&Interaction" = 34, "Env&Line&Interaction" = 7))
+
+plot(fit1,  lty = 1:3, quantities = TRUE)
+#output = Venn Diagram
+```
+
+Now that we've finished our data analysis for the F1 generation, let's do the same for the F3 generation. This will help us compare across the generations to determine if expression patterns remain the same after a couple generations of reciprocal transplantat conditions. Since many of the commands are the same, I will include fewer annotations below, but will still include the function outputs where appropriate.
+
+```
+countsTable <- read.table("DE_counts_F3.txt", header=TRUE, row.names=1)
+dim(countsTable)
+#[1] 25279    16   #Now we're working with 25279 genes across 16 samples
+countsTableRound <- round(countsTable)
+conds <- read.delim("RT_tonsa_F3_samples.txt", header=TRUE, stringsAsFactors=TRUE, row.names=1)
+
+print(conds)
+colSums(countsTableRound)
+mean(colSums(countsTableRound))
+barplot(colSums(countsTableRound), names.arg=colnames(countsTableRound),cex.names=0.5,las=3)
+abline(h=mean(colSums(countsTableRound)), col="blue", lwd=2)
+#output = histogram
+
+rowSums(countsTableRound)
+mean(rowSums(countsTableRound))
+#[1] 11220.54
+median(rowSums(countsTableRound))
+#[1] 2144
+
+apply(countsTableRound,2,mean)
+apply(countsTableRound,1,mean)
+hist(apply(countsTableRound,1,mean))
+hist(apply(countsTableRound,1,mean),xlim=c(0,1000), breaks=10000)
+
+dds <- DESeqDataSetFromMatrix(countData = countsTableRound, colData = conds, design = ~ line + environment + line:environment)
+dim(dds)
+#[1] 25279    16
+
+dds <- dds[rowSums(counts(dds)) >160]
+dim(dds)
+#[1] 25279    16
+
+dds <- DESeq(dds)
+resultsNames(dds)
+#[1] "Intercept"                  "line_combined_vs_ambient"  
+#[3] "environment_HH_vs_AA"       "linecombined.environmentHH"
+
+vsd <- vst(dds, blind=FALSE)
+data <- plotPCA(vsd, intgroup=c("line", "environment"),returnData=TRUE)
+percentVar <- round(100 * attr(data, "percentVar"))
+ggplot(data, aes(PC1, PC2, color=environment, shape=line)) + geom_point(size=4, alpha=0.85) + xlab(paste0("PC1: ", percentVar[1], "% variance")) + ylab(paste0("PC2: ",percentVar[2], "% variance")) + theme_minimal()
+#output = PCA
+#Here, we can again see clustering based on line and evironment - let's dig deeper into the stats
+
+resInteraction <- results(dds, alpha=0.05)
+resInteraction <- resInteraction[order(resInteraction$padj),]
+summary(resInteraction)
+#out of 25279 with nonzero total read count
+#adjusted p-value < 0.05
+#LFC > 0 (up)       : 271, 1.1%
+#LFC < 0 (down)     : 60, 0.24%
+#outliers [1]       : 5, 0.02%
+#low counts [2]     : 2451, 9.7%
+#(mean count < 26)
+#[1] see 'cooksCutoff' argument of ?results
+#[2] see 'independentFiltering' argument of ?results
+#About 1.34% of genes are interacting - fewer than the 16% in F1
+```
+
+Again, first, let's test for the effects of the environment
+```
+dds <- DESeqDataSetFromMatrix(countData = countsTableRound, colData = conds, design = ~ line + environment)
+dds <- DESeq(dds, test="LRT",reduced=~line)
+resultsNames(dds)
+#[1] "Intercept"                "line_combined_vs_ambient"
+#[3] "environment_HH_vs_AA"
+
+resEnv <- results(dds, alpha = 0.05)
+resEnv <- resEnv[order(resEnv$padj),]
+summary(resEnv)
+
+#out of 25279 with nonzero total read count
+#adjusted p-value < 0.05
+#LFC > 0 (up)       : 513, 2%
+#LFC < 0 (down)     : 315, 1.2%
+#outliers [1]       : 16, 0.063%
+#low counts [2]     : 491, 1.9%
+#(mean count < 19)
+#[1] see 'cooksCutoff' argument of ?results
+#[2] see 'independentFiltering' argument of ?results
+resEnv <- resEnv[!is.na(resEnv$padj),]
+degsEnv <- row.names(resEnv[resEnv$padj < 0.05,])
+length(degsEnv)
+#[1] 828   #828 genes were affected by environment - nearly twice as many as in F1
+```
+
+Second, let's test for effects of selection line
+```
+dds <- DESeqDataSetFromMatrix(countData = countsTableRound, colData = conds, design = ~ environment + line)
+
+dds <- DESeq(dds, test="LRT", reduced=~environment)
+resultsNames(dds)
+resLine <- results(dds, alpha = 0.05)
+resLine <- resLine[order(resLine$padj),]
+summary(resLine)
+#out of 25279 with nonzero total read count
+#adjusted p-value < 0.05
+#LFC > 0 (up)       : 808, 3.2%
+#LFC < 0 (down)     : 837, 3.3%
+#outliers [1]       : 16, 0.063%
+#low counts [2]     : 981, 3.9%
+#(mean count < 21)
+#[1] see 'cooksCutoff' argument of ?results
+#[2] see 'independentFiltering' argument of ?results
+resLine <- resLine[!is.na(resLine$padj),]
+degsline <- row.names(resLine[resLine$padj < 0.05,])
+length(degsline)
+#[1] 1645   #1654 genes affected by line - way more than in F1
+```
+
+Finally, let's see how many genes had differential expression based on an interaction between environment and line
+```
+dds <- DESeqDataSetFromMatrix(countData = countsTableRound, colData = conds, design = ~ environment + line + environment:line)
+
+dds <- DESeq(dds, test="LRT", reduced=~environment + line)
+resultsNames(dds)
+#[1] "Intercept"                "environment_HH_vs_AA"     "line_combined_vs_ambient"
+#[4] "environmentHH.linecombined"
+
+resInt <- results(dds, alpha = 0.05)
+resInt <- resInt[order(resInt$padj),]
+summary(resInt)
+#out of 25279 with nonzero total read count
+#adjusted p-value < 0.05
+#LFC > 0 (up)       : 235, 0.93%
+#LFC < 0 (down)     : 48, 0.19%
+#outliers [1]       : 5, 0.02%
+#low counts [2]     : 2941, 12%
+#(mean count < 28)
+#[1] see 'cooksCutoff' argument of ?results
+#[2] see 'independentFiltering' argument of ?results
+resInt <- resInt[!is.na(resInt$padj),]
+degsInt <- row.names(resInt[resInt$padj < 0.05,])
+length(degsInt)
+#[1] 283   #Still some genes that are affected by the interaction - about as many as were affected by line in F1
+```
+
+Venn Diagram Visualization:
+```
+library(eulerr)
+
+#Total genes involved in env, line, or int
+length(degsEnv)
+#[1] 828
+length(degsline)
+#[1] 1645
+length(degsInt)
+#[1] 283
+
+#Intersections - how many genes overlap between all the comparisons
+length(intersect(degsEnv,degsline))
+#[1] 141
+length(intersect(degsEnv,degsInt))
+#[1] 14
+length(intersect(degsInt,degsline))
+#[1] 32
+
+#and last, we want to save the intersection of environment and line to calculate the genes that fall into that center spot
+intEL <- intersect(degsEnv,degsline)
+length(intersect(degsInt,intEL))
+#[1] 7
+# Number unique
+828-14-141-7
+#[1] 666
+1645-141-32-7
+#[1] 1465
+283-14-32-7
+#[1] 230
+
+#Plot Venn Diagram
+fit1 <- euler(c("Env" = 666, "Line" = 1465, "Interaction" = 230, "Env&Line" = 141, "Env&Interaction" = 14, "Line&Interaction" = 32, "Env&Line&Interaction" = 7))
+plot(fit1,  lty = 1:3, quantities = TRUE)
+#outout = Venn Diagram
+```

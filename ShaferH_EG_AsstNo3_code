@@ -1,0 +1,319 @@
+#!/bin/bash
+
+#EG ASST 3
+
+#Question 1: Genomic region association with climate data
+
+#Assign chromosome for the rest of analysis; I will just be looking at Chromosome #14
+CHR="Chr14"
+
+#Navigate to the correct directory
+cd /data/project_data/PopGenomics/shared/${CHR}_sweeps/LAI/
+
+#Get phenotype data from meta file for the admixed samples
+tail -n +2 /data/project_data/PopGenomics/climDat.txt | \
+grep -w -f Admixed.Inds - >Admixed.pheno
+printf "#FID\tIID\tmean_cGDDfreeze\tmed_DD0\tmean_finalFreeze\n%.0s" >Plink/pheno.forPlink
+cat Admixed.pheno >>Plink/pheno.forPlink
+
+#Get K=2 ADMIX to use as covariate; Need to use tail -n +2 to skip the header in the metadata file before pasting to the Q file
+tail -n +2 /data/project_data/PopGenomics/Combined_Transect_Sampling_Data_2020.txt | \
+cut -f1 | \
+paste - /data/project_data/PopGenomics/shared/poplar_hybrids.LDpruned.5.Q | \
+grep -w -f Admixed.Inds - | \
+sed 's/\s/\t/g' | \
+cut -f 1,5 >Plink/Admixed_KBals
+
+cat /data/project_data/PopGenomics/Combined_Transect_Sampling_Data_2020.txt | \
+cut -f1-2 | \
+grep -w -f Admixed.Inds - | \
+sed 's/\s/\t/g' | \
+cut -f2 >Plink/Transect
+
+#Create the cov file with KBals
+printf "#FID\tIID\tK2Q\n%.0s" >Plink/cov.forPlink
+paste Plink/Transect Plink/Admixed_KBals >>Plink/cov.forPlink
+cd Plink/
+plink2 --bfile ${CHR}_Admixed_FAI \
+--pheno pheno.forPlink \
+--covar cov.forPlink \
+--glm omit-ref
+
+#Now head over to R to plot it all out
+
+#Load the right packages
+library(ggplot2)
+library(gridExtra)
+
+#Set the working directory
+setwd("~/Desktop/eco gen/Ecological-Genomics")
+
+#Load in the files previously transferred from the server to my laptop
+
+#Get the list of admixed individuals
+Admixed <- read.table("Admixed.Inds",header=F)
+
+# Get the meta data file
+meta <- read.table("Combined_Transect_Sampling_Data_2020.txt", sep="\t",header=T)
+
+#Merge the admixed individuals file and the meta data file together
+meta_admx <- merge(meta, Admixed, by.x="ID", by.y="V1")
+str(meta_admx)  
+
+#Read in the Admixture coefficients for KBals that we made from the K=5 file (K=5 because it was found to have the lowest cross validation error)
+KBals <- read.table("Admixed_KBals", sep="\t", header=F)
+names(KBals) = c("ID","KBals")
+
+#Second merge, this time including the Admixture coefficients for KBals
+meta_admx_KBals <- merge(meta_admx,KBals,by="ID")
+
+
+#Bring in phenotype data: climate data including average number of growing degree days (mean_cGDDfreeze), average chilling degree days (med_DD0), and average date of final freeze (mean_finalFreeze)
+pheno <- read.table("climDat.txt",sep="\t",header=T)
+
+# Merge that phenotype data with the meta data and KBals Admixture data
+meta_admx_KBals_pheno <- merge(meta_admx_KBals,pheno,by="ID")
+
+#Plot that phenotype data
+
+#Mean growing degree days
+plotmean_cGDDfreeze <- ggplot(meta_admx_KBals_pheno,aes(x=KBals,y=mean_cGDDfreeze, color=Transect.x)) +
+  geom_point(size=2) + 
+  xlab("Proportion P. balsamifera ancestry") +
+  ylab("Mean Growing Degree Days") 
+plotmean_cGDDfreeze
+
+#Mean chilling degree days
+plotmed_DD0 <- ggplot(meta_admx_KBals_pheno,aes(x=KBals,y=med_DD0, color=Transect.x)) +
+  geom_point(size=2) + 
+  xlab("Proportion P. balsamifera ancestry") +
+  ylab("Mean Chilling Degree Days") 
+plotmed_DD0
+
+#Average day of final freeze
+plotmean_finalFreeze <- ggplot(meta_admx_KBals_pheno,aes(x=KBals,y=mean_finalFreeze, color=Transect.x)) +
+  geom_point(size=2) + 
+  xlab("Proportion P. balsamifera ancestry") +
+  ylab("Average Day of Final Freeze") 
+plotmean_finalFreeze
+
+#Figure 1:
+grid.arrange(plotmean_cGDDfreeze, plotmed_DD0, plotplotmean_finalFreeze, nrow = 3)
+
+#linear models testing trait ~ genome-wide admixture association
+summary(lm(mean_cGDDfreeze~KBals + Transect.x, data=meta_admx_KBals_pheno))
+
+summary(lm(med_DD0~KBals + Transect.x, data=meta_admx_KBals_pheno))
+
+summary(lm(mean_finalFreeze~KBals + Transect.x, data=meta_admx_KBals_pheno))
+
+#Bring in Association results from Plink & plot each
+#Define association outliers as the upper 0.1% of p-values
+
+#Read in list of positions
+snps <- read.table("Chr14.kept.sites",sep="\t", header=T)
+
+#Growing Degree Days
+GDD <- read.table("plink2.mean_cGDDfreeze.glm.linear",skip=1,sep="\t",header=F)
+names(GDD) = c("CHROM",    "POS",  "ID",   "REF",  "ALT",  "A1",   "TEST", "OBS_CT",   "BETA", "SE",   "T_STAT",   "P")
+GDD2 <- GDD[which(GDD$TEST=="ADD"),]
+GDD2 <- cbind(snps, GDD2[,-c(1:2)])
+GDD2$outlier = ifelse(GDD2$P<quantile(GDD2$P,0.001),2,1)
+
+p1 <- ggplot(GDD2,aes(x=POS,y=-1*log10(P))) +
+  geom_point(size=GDD2$outlier, color=GDD2$outlier) + 
+  xlab("Position (bp) along chromosome") +
+  ylab("-log10 P-value") +
+  ggtitle("Mean Growing Degree Days")
+
+#Chilling Degree Days
+chilling <- read.table("plink2.med_DD0.glm.linear",skip=1,sep="\t",header=F)
+names(chilling) = c("CHROM",  "POS",  "ID",   "REF",  "ALT",  "A1",   "TEST", "OBS_CT",   "BETA", "SE",   "T_STAT",   "P")
+chilling2 <- chilling[which(chilling$TEST=="ADD"),]
+chilling2 <- cbind(snps, chilling2[,-c(1,2)])
+chilling2$outlier = ifelse(chilling2$P<quantile(chilling2$P,0.001),2,1)
+
+p2 <- ggplot(chilling2,aes(x=POS,y=-1*log10(P))) +
+  geom_point(size=chilling2$outlier, color=chilling2$outlier) + 
+  xlab("Position (bp) along chromosome") +
+  ylab("-log10 P-value") +
+  ggtitle("Mean Chilling Degree Days")
+
+#Final Freeze
+freeze <- read.table("plink2.mean_finalFreeze.glm.linear",skip=1,sep="\t",header=F)
+names(freeze) = c("CHROM",    "POS",  "ID",   "REF",  "ALT",  "A1",   "TEST", "OBS_CT",   "BETA", "SE",   "T_STAT",   "P")
+freeze <- freeze[which(freeze$TEST=="ADD"),]
+freeze2 <- cbind(snps, freeze[,-c(1,2)])
+freeze2$outlier = ifelse(freeze2$P<quantile(freeze2$P,0.001),2,1)
+
+p3 <- ggplot(freeze2,aes(x=POS,y=-1*log10(P))) +
+  geom_point(size=freeze2$outlier, color=freeze2$outlier) + 
+  xlab("Position (bp) along chromosome") +
+  ylab("-log10 P-value") +
+  ggtitle("Average Day of Final Freeze")
+
+#Plot freq of LAI (Local Ancestry Inference) along Chromosome 14
+AF <- read.table("Chr14_LAI_freq.afreq", skip=1,sep="\t",header=F)
+names(AF) = c("CHROM",  "ID",   "REF",  "ALT",  "ALT_FREQS",    "OBS_CT")
+str(AF)
+
+AF2 <- cbind(snps,AF)
+
+windows <- seq(1,max(AF2$POS),5e4)
+AF_windows <- numeric()
+
+for(i in 1:length(windows)){
+  tmp=AF2[which(AF2$POS>windows[i] & AF2$POS<windows[i+1]),"ALT_FREQS"]
+  ancfreq=mean(tmp)
+  AF_windows[i] = ancfreq
+}
+
+AF3 <- as.data.frame(cbind(windows,AF_windows))
+names(AF3) = c("window","AvgAncFreq")
+
+#Define outlier regions of ancestry along Chromosome 14 (+/- 2 standard deviations from the mean ancestry on the chromosome); these regions will be interesting to explore for candidate genes, especially if we see that they're co-located with the phenotype associations
+
+upper = mean(AF3$AvgAncFreq,na.rm=T) + 2*sd(AF3$AvgAncFreq,na.rm=T)
+lower = mean(AF3$AvgAncFreq,na.rm=T) - 2*sd(AF3$AvgAncFreq,na.rm=T)
+
+outliers_upper = AF3[which(AF3$AvgAncFreq>upper),]
+outliers_lower = AF3[which(AF3$AvgAncFreq<lower),]
+
+#Print the outlier regions out
+outliers_upper
+outliers_lower
+
+p4 <- ggplot(AF3[,-3],aes(x=window,y=AvgAncFreq)) +
+  geom_line(size=0.8, color="blue") + 
+  xlab("Position (bp) along chromosome") +
+  ylab("Frequency P. trichocarpa ancestry") +
+  geom_hline(yintercept=mean(AF2$ALT_FREQS), color = "red") + 
+  geom_hline(yintercept=upper, linetype="dashed", color = "red") + 
+  geom_hline(yintercept=lower, linetype="dashed", color = "red") +
+  ggtitle("Chr14: Local ancestry")
+
+#Figure 2:
+grid.arrange(p1, p2, p3, p4, nrow = 4)
+
+#Question 2: climate~local ancestry & phenology~local ancestry overlap
+
+#Get Plink outputs into R - specifically, call on budflush here
+
+budflush <- read.table("plink2.FLUSH.glm.linear",skip=1,sep="\t",header=F)
+names(budflush) = c("CHROM",    "POS",  "ID",   "REF",  "ALT",  "A1",   "TEST", "OBS_CT",   "BETA", "SE",   "T_STAT",   "P")
+budflush <- budflush[which(budflush$TEST=="ADD"),]
+budflush2 <- cbind(snps, budflush[,-c(1,2)])
+
+#Assign outliers - this time with a threshold of 1% rather than 0.1% in order to have a larger potential overlapping region to explore
+budflush2$outlier = ifelse(budflush2$P<quantile(budflush2$P,0.01),2,1)
+
+#Load the necessary packages for this analysis
+library(GenomicRanges)
+library(GenomicFeatures)
+
+#Define 50kb sliding window for the SNPs being tested
+budflushGR <- GRanges(CHR,IRanges(budflush2$POS-2.5e4,budflush2$POS+2.5e4),POS=budflush2$POS, P=budflush2$P, outlier=budflush2$outlier)
+
+#Subset out a reduced set of windows to capture the outlier regions
+budflushGRout <- unlist(reduce(split(budflushGR, ~outlier)))
+budflushGRout$outlier <- names(budflushGRout)
+budflushGRCand <- subset(budflushGRout, outlier==2)
+
+#Repeat above for the 3 climate variables and then I'll have the 4 sets of candidates to then use the overlap command on
+GDD2$outlier = ifelse(GDD2$P<quantile(GDD2$P,0.01),2,1)
+GDDGR <- GRanges(CHR,IRanges(GDD2$POS-2.5e4,GDD2$POS+2.5e4),POS=GDD2$POS, P=GDD2$P, outlier=GDD2$outlier)
+GDDGRout <- unlist(reduce(split(GDDGR, ~outlier)))
+GDDGRout$outlier <- names(GDDGRout)
+GDDGRCand <- subset(GDDGRout, outlier==2)
+
+chilling2$outlier = ifelse(chilling2$P<quantile(chilling2$P,0.01),2,1)
+chillingGR <- GRanges(CHR,IRanges(chilling2$POS-2.5e4,chilling2$POS+2.5e4),POS=chilling2$POS, P=chilling2$P, outlier=chilling2$outlier)
+chillingGRout <- unlist(reduce(split(chillingGR, ~outlier)))
+chillingGRout$outlier <- names(chillingGRout)
+chillingGRCand <- subset(chillingGRout, outlier==2)
+
+freeze2$outlier = ifelse(freeze2$P<quantile(freeze2$P,0.01),2,1)
+freezeGR <- GRanges(CHR,IRanges(freeze2$POS-2.5e4,freeze2$POS+2.5e4),POS=freeze2$POS, P=freeze2$P, outlier=freeze2$outlier)
+freezeGRout <- unlist(reduce(split(freezeGR, ~outlier)))
+freezeGRout$outlier <- names(freezeGRout)
+freezeGRCand <- subset(freezeGRout, outlier==2)
+
+#Print the candidate regions
+budflushGRCand 
+GDDGRCand
+chillingGRCand
+freezeGRCand
+
+#Now subset out by overlapping regions and print each
+
+overlap_BF_GDD <- subsetByOverlaps(budflushGRCand, GDDGRCand)
+length(overlap_BF_GDD)
+overlap_BF_GDD
+
+overlap_BF_chilling <- subsetByOverlaps(budflushGRCand, chillingGRCand)
+length(overlap_BF_chilling)
+overlap_BF_chilling
+
+overlap_BF_freeze <- subsetByOverlaps(budflushGRCand, freezeGRCand)
+length(overlap_BF_freeze)
+overlap_BF_freeze
+
+txdb <- makeTxDbFromGFF("Ptrichocarpa_533_v4.1.gene.gff3.gz", format="gff3")
+
+genes <- unlist(reduce(transcriptsBy(txdb, by="gene")))
+genes$geneID <- names(genes)
+
+candGenes1 <- subsetByOverlaps(genes, overlap_BF_GDD)
+candGenes1
+candGenes1@ranges@NAMES #1 gene
+#Potri.014G170400
+#No GO enrichment terms associated with it
+
+candGenes2 <- subsetByOverlaps(genes, overlap_BF_chilling)
+candGenes2
+candGenes2@ranges@NAMES #19 genes
+# Potri.014G137400
+# Potri.014G137550
+# Potri.014G137700
+# Potri.014G137850
+# Potri.014G138000
+# Potri.014G138100
+# Potri.014G138200
+# Potri.014G138400
+# Potri.014G138500
+# Potri.014G138700
+# Potri.014G138800
+# Potri.014G138900
+# Potri.014G139000
+# Potri.014G139100
+# Potri.014G139200
+# Potri.014G139300
+# Potri.014G139400
+# Potri.014G139500
+# Potri.014G139600
+#Enrichment = 1 miRNA for cleavage, 2 for chipSeq
+
+candGenes3 <- subsetByOverlaps(genes, overlap_BF_freeze)
+View(candGenes3)
+candGenes3@ranges@NAMES #17 genes
+# Potri.014G020100
+# Potri.014G020200
+# Potri.014G020300
+# Potri.014G020432
+# Potri.014G020500
+# Potri.014G020600
+# Potri.014G020700
+# Potri.014G020900
+# Potri.014G021000
+# Potri.014G021100
+# Potri.014G021250
+# Potri.014G021400
+# Potri.014G021700
+# Potri.014G021800
+# Potri.014G021900
+# Potri.014G022000
+# Potri.014G170400
+#Enrichment = 2 for biological processes (incl. oxidation-reduction and single-organism metabolic process)
+#5,4,&3 for molecular function (highest = iron ion bonding, tetrapyrrole binding, oxidoreductase activity, heme binding, and elecrton carrier activity)
+#1 under the pfam category, cytochrome
+#1 under the chipSeq id category
